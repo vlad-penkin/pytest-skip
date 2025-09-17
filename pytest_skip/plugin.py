@@ -20,18 +20,25 @@ class SelectOption(Enum):
 class Matcher:
     test_names: Dict[str, Union[Literal[True], Set[Pattern]]] = field(default_factory=dict)
     seen_test_names: Set[str] = field(default_factory=set)
+    # Track parametrized test variants by base name
+    parametrized_variants: Dict[str, Set[str]] = field(default_factory=dict)
 
     regexp_test_name_suffix: ClassVar[str] = "@regexp"
     regexp_test_name_pattern: ClassVar[Pattern] = re.compile(r"^(.+)\[r\"(.*?)\"\]@regexp$")
     test_name_pattern: ClassVar[Pattern] = re.compile(r"^(.+?)\[(.*)\]$")
 
     def add(self, test_name: str):
-        # Check if the line has the regexp suffix before matching
-        # the whole pattern. Saves time on huge skip-lists
+        # Check if the line is a parametrized test
+        if test_name[-1] == "]" and (match := self.test_name_pattern.match(test_name)) is not None:
+            base_name, params = match.groups()
+            # Store full test name as a variant under the base name
+            variants = self.parametrized_variants.setdefault(base_name, set())
+            variants.add(test_name)
+        # Existing logic for regex and non-regex test names
         if test_name.endswith(self.regexp_test_name_suffix):
             match = self.regexp_test_name_pattern.match(test_name)
             if match is None:
-                warnings.warn(f"The line '{test_name}' has athe @regexp "
+                warnings.warn(f"The line '{test_name}' has the @regexp "
                               "suffix but doesn't contain an actual regexp. The line will be "
                               "treated as a non-regexp.")
                 self.test_names[test_name[:-len(self.regexp_test_name_suffix)]] = True
@@ -65,7 +72,7 @@ class Matcher:
         else:
             params = ""
         if isinstance(matches, set):
-            matches = any(m.match(params) for m in matches)  # type: ignore[assignment]
+            matches = any(m.match(params) for m in matches)
         if matches:
             self.seen_test_names.add(name)
             return True
@@ -73,6 +80,15 @@ class Matcher:
 
     def match_item(self, item: pytest.Item) -> bool:
         return self.match_name(item.nodeid) or self.match_name(item.name)
+
+    def get_all_variants_skipped(self) -> Set[str]:
+        """Return base names where all parametrized variants are in the skip list."""
+        all_skipped = set()
+        for base_name, variants in self.parametrized_variants.items():
+            # Check if all variants are in test_names
+            if all(variant in self.test_names for variant in variants):
+                all_skipped.add(base_name)
+        return all_skipped
 
 
 @dataclass
@@ -88,7 +104,6 @@ class ShardingConfig:
     items_weights: Optional[dict[str, float]]
 
     def _round_robin_sharding(self, selected_items: list[str], deselected_items: list[str]):
-        # Round-robin sharding distributes tests evenly across shards.
         if self.shard_id >= len(selected_items):
             deselected_items.extend(selected_items)
             return [], deselected_items
@@ -121,12 +136,10 @@ class ShardingConfig:
         raise ValueError(f"Unsupported sharding mode: {self.mode}")
 
     def _weighted_sharding(self, selected_items: list[str], deselected_items: list[str]):
-        # TODO: implement
         raise NotImplementedError("Sharding with weights is not supported yet.")
 
     @classmethod
     def _parse_weights(cls, weights_filepath):
-        # TODO: implement
         raise NotImplementedError("Sharding with weights is not supported yet.")
 
     def do_sharding(self, selected_items: list[str], deselected_items: list[str]):
@@ -144,9 +157,7 @@ class ShardingConfig:
         if mode not in allowed_modes:
             allowed_modes_str = ", ".join(allowed_modes)
             raise ValueError(f"Invalid sharding mode: {mode}. Available modes: {allowed_modes_str}")
-        # weights_filepath = config.getoption("shard_weights_file")
         weights_filepath = None
-
         items_weights = None
         if weights_filepath:
             items_weights = cls._parse_weights(weights_filepath)
@@ -191,8 +202,6 @@ class SelectConfig:
     def check_missing_tests(self):
         for n, m in self.get_matchers().items():
             if (missing := set(m.test_names.keys()) - m.seen_test_names):
-                # If any items remain in `test_names` those tests either don't exist or
-                # have been deselected by another way - warn user
                 message = (f"\npytest-skip: Not all tests to {n} exist.\n"
                            f"Missing test names to {n}:\n  - ")
                 message += "\n  - ".join(missing)
@@ -214,8 +223,8 @@ class SelectConfig:
                 for v in value.split(";"):
                     if (v := v.strip()):
                         add_fn(v)
-        return SelectConfig(  # pylint: disable=E1120
-            *tuple(matchers.values()),  # type: ignore[call-arg,arg-type]
+        return SelectConfig(
+            *tuple(matchers.values()),
             fail_on_missing) if any(matchers.values()) else None
 
     def get_matchers(self) -> Dict[str, Optional[Matcher]]:
@@ -227,9 +236,9 @@ def pytest_addoption(parser: pytest.Parser):
         pytest_select_version = importlib.metadata.version("pytest-select")
         pytest_skip_version = importlib.metadata.version("pytest-skip")
         raise ValueError(
-            f"Conflicting pytest-select {pytest_select_version} and pytest-skip {pytest_skip_version} packages are detected, unistall either one of them"
+            f"Conflicting pytest-select {pytest_select_version} and pytest-skip {pytest_skip_version} packages are detected, uninstall either one of them"
         )
-    except importlib.metadata.PackageNotFoundError:  # noqa: E722
+    except importlib.metadata.PackageNotFoundError:
         pass
     select_group = parser.getgroup(
         "select",
@@ -311,8 +320,8 @@ def pytest_addoption(parser: pytest.Parser):
     )
 
 
-@pytest.hookimpl(trylast=True)  # pragma: no mutate
-def pytest_report_header(config) -> List[str]:  # pylint:disable = R1710
+@pytest.hookimpl(trylast=True)
+def pytest_report_header(config) -> List[str]:
     hdr = []
     for option in SelectOption:
         for opt in option.value:
@@ -330,7 +339,7 @@ class SelectPlugin:
 
     def pytest_collection_modifyitems(
         self,
-        session,  # pylint: disable=W0613
+        session,
         config: pytest.Config,
         items: List[pytest.Item],
     ):
@@ -347,7 +356,13 @@ class SelectPlugin:
         else:
             selected, deselected, skipped = [], [], []
             select, deselect, skip = select_config.select, select_config.deselect, select_config.skip
+            # Track collected parametrized test variants
+            collected_variants: Dict[str, Set[str]] = {}
             for item in items:
+                if item.nodeid[-1] == "]" and (match := Matcher.test_name_pattern.match(item.nodeid)):
+                    base_name, _ = match.groups()
+                    variants = collected_variants.setdefault(base_name, set())
+                    variants.add(item.nodeid)
                 if select is None or select.match_item(item):
                     selected.append(item)
                 if deselect and deselect.match_item(item) and selected and selected[-1] is item:
@@ -357,7 +372,17 @@ class SelectPlugin:
                     selected.pop()
                     skipped.append(item)
                     item.add_marker(pytest.mark.skip(reason="Skipped by pytest-skip"))
-            self.select_config = select_config  # pylint: disable=W0201
+            self.select_config = select_config
+
+            # Check for parametrized tests where all variants are skipped
+            if skip:
+                all_skipped = skip.get_all_variants_skipped()
+                for base_name in all_skipped:
+                    # Verify all variants are collected to avoid false positives
+                    if base_name in collected_variants:
+                        message = (f"\npytest-skip: All variants of parametrized test '{base_name}' "
+                                   "are skipped:\n  - " + "\n  - ".join(sorted(skip.parametrized_variants[base_name])))
+                        warnings.warn(UserWarning(message))
 
         if sharding_config is not None:
             selected, deselected = sharding_config.do_sharding(selected, deselected)
@@ -366,32 +391,38 @@ class SelectPlugin:
         if deselected:
             config.hook.pytest_deselected(items=deselected)
 
-    def pytest_sessionfinish(self, session, exitstatus):  # pylint: disable=W0613
+    def pytest_sessionfinish(self, session, exitstatus):
         if (select_config := getattr(self, "select_config", None)) is not None:
             select_config.check_missing_tests()
 
 
 class SelectXdistPlugin(SelectPlugin):
 
-    def pytest_testnodedown(self, node, error):  # pylint: disable=W0613
+    def pytest_testnodedown(self, node, error):
         if (worker_output := getattr(node, "workeroutput", None)) is None:
             return
         if hasattr(self, "select_config"):
             select_config = self.select_config
         else:
-            self.select_config = select_config = SelectConfig.from_config(node.config)  # pylint: disable=W0201
+            self.select_config = select_config = SelectConfig.from_config(node.config)
         if select_config is None:
             return
         for n, m in select_config.get_matchers().items():
             m.seen_test_names.update(worker_output[f"{n}_seen_test_names"])
+            # Update parametrized_variants for xdist workers
+            if n == "skip" and hasattr(m, "parametrized_variants"):
+                worker_variants = worker_output.get(f"{n}_parametrized_variants", {})
+                for base_name, variants in worker_variants.items():
+                    m.parametrized_variants.setdefault(base_name, set()).update(variants)
 
-    def pytest_sessionfinish(self, session, exitstatus):  # pylint: disable=W0613
+    def pytest_sessionfinish(self, session, exitstatus):
         if (workeroutput := getattr(session.config, "workeroutput", None)) is None:
-            # Ensure that it runs only in the master process when using xdist:
             super().pytest_sessionfinish(session, exitstatus)
         elif (select_config := getattr(self, "select_config", None)) is not None:
             for n, m in select_config.get_matchers().items():
                 workeroutput[f"{n}_seen_test_names"] = m.seen_test_names
+                if n == "skip":
+                    workeroutput[f"{n}_parametrized_variants"] = m.parametrized_variants
 
 
 def pytest_configure(config: pytest.Config):
