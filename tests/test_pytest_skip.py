@@ -1,6 +1,5 @@
 import itertools
 import pytest
-
 from pytest import ExitCode
 from pytest_skip.plugin import Matcher
 from .conftest import SELECT_OPT, DESELECT_OPT, SKIP_OPT
@@ -9,10 +8,8 @@ from .conftest import SELECT_OPT, DESELECT_OPT, SKIP_OPT
 # what contains the failing/passing combinations as a field
 TEST_CONTENT_PASSING_COMBINATIONS = ("test_a[1-1]", "test_a[1-4]")
 TEST_CONTENT_FAILING_COMBINATIONS = ("test_a[1-2]", "test_a[1-3]")
-
 TEST_CONTENT = """
     import pytest
-
     @pytest.mark.parametrize(
         ('a', 'b'),
         (
@@ -25,11 +22,9 @@ TEST_CONTENT = """
     def test_a(a, b):
         assert b in (1, 4)
 """
-
 TEST_CONTENT_PASS = """
     import pytest
     import itertools
-
     @pytest.mark.parametrize(
         ('a', 'b', 'c'),
         list(itertools.product((1, 2, 3), repeat=3))
@@ -37,10 +32,8 @@ TEST_CONTENT_PASS = """
     def test_a(a, b, c):
         pass
 """
-
 TEST_CONTENT_WITH_NESTED_BRACKETS = """
     import pytest
-
     @pytest.mark.parametrize(
         ('a', 'b'),
         (
@@ -52,7 +45,6 @@ TEST_CONTENT_WITH_NESTED_BRACKETS = """
     )
     def test_a(a, b):
         assert b in (1, 4)
-
     @pytest.mark.parametrize(
         ('a', 'b'),
         (
@@ -65,10 +57,8 @@ TEST_CONTENT_WITH_NESTED_BRACKETS = """
     def test_b(a, b):
         assert b in ('a[1]', '4')
 """
-
 TEST_CONTENT_WITH_REGEXP_AS_PARAM = """
     import pytest
-
     @pytest.mark.parametrize(
         ('a'),
         (
@@ -80,25 +70,20 @@ TEST_CONTENT_WITH_REGEXP_AS_PARAM = """
         assert True
 """
 
-
 @pytest.mark.parametrize("option_name", (SELECT_OPT, DESELECT_OPT))
 def test_select_options_exist(testdir, option_name):
     selection_file_name = testdir.makefile(".txt", "test_a", "test_b")
     result = testdir.runpytest(option_name, selection_file_name)
-
     result.assert_outcomes()
     assert result.ret == 5
-
 
 @pytest.mark.parametrize("option_name", (SELECT_OPT, DESELECT_OPT))
 def test_missing_selection_file_fails(testdir, option_name):
     missing_file_name = "no_such_file.txt"
     result = testdir.runpytest(option_name, missing_file_name)
-
     assert result.ret == 4
     result.stderr.re_match_lines(
         [f"ERROR: Given selection file '{missing_file_name}' doesn't exist."])
-
 
 @pytest.mark.parametrize(
     ("select_option", "select_content", "exit_code", "outcomes", "stdout_lines"),
@@ -255,7 +240,7 @@ def test_missing_selection_file_fails(testdir, option_name):
         ),
     ),
 )
-def test_tests_are_selected(  # pylint: disable=R0913, disable=R0917
+def test_tests_are_selected( # pylint: disable=R0913, disable=R0917
     testdir,
     select_option,
     exit_code,
@@ -272,12 +257,10 @@ def test_tests_are_selected(  # pylint: disable=R0913, disable=R0917
         )
         args.extend([select_option, select_file])
     result = testdir.runpytest(*args)
-
     assert result.ret == exit_code
     result.assert_outcomes(**outcomes)
     if stdout_lines:
         result.stdout.re_match_lines_random(stdout_lines)
-
 
 @pytest.mark.parametrize("use_xdist", (False, True))
 @pytest.mark.parametrize("has_missing_tests", (False, True))
@@ -285,9 +268,7 @@ def test_tests_are_selected(  # pylint: disable=R0913, disable=R0917
 def test_fail_on_missing(is_xdist_installed, testdir, deselect, has_missing_tests, use_xdist):
     if use_xdist and not is_xdist_installed:
         pytest.skip("xdist is not installed")
-
     testdir.makefile(".py", TEST_CONTENT)
-
     existing_tests = TEST_CONTENT_FAILING_COMBINATIONS if deselect else TEST_CONTENT_PASSING_COMBINATIONS
     file_tests = ("test_a[1-1]", "test_a[2-1]") if has_missing_tests else existing_tests
     selectfile = testdir.makefile(".txt", *file_tests)
@@ -295,10 +276,9 @@ def test_fail_on_missing(is_xdist_installed, testdir, deselect, has_missing_test
         "-v",
         "--select-fail-on-missing",
         "-n 1" if use_xdist else "",
-        f"--{'de' if deselect else ''}select-from-file",  # pylint: disable=W1405
+        f"--{'de' if deselect else ''}select-from-file", # pylint: disable=W1405
         selectfile,
     )
-
     assert result.ret == (4 if has_missing_tests else 0)
     if deselect:
         first_line = r"pytest-skip: Not all tests to deselect exist."
@@ -310,9 +290,8 @@ def test_fail_on_missing(is_xdist_installed, testdir, deselect, has_missing_test
         result.stderr.re_match_lines([
             first_line,
             second_line,
-            # "  - test_a[2-1]",
+            # " - test_a[2-1]",
         ])
-
 
 @pytest.mark.parametrize(("fail_on_missing", "deselect"), [(True, False), (True, True),
                                                            (False, False), (False, True)])
@@ -321,19 +300,17 @@ def test_report_header(testdir, fail_on_missing, deselect):
     selectfile = testdir.makefile(".txt", "test_a[1-1]")
     args = [
         "-v",
-        f"--{'de' if deselect else ''}select-from-file",  # pylint: disable=W1405
+        f"--{'de' if deselect else ''}select-from-file", # pylint: disable=W1405
         selectfile,
     ]
     if fail_on_missing:
         args.append("--select-fail-on-missing")
     result = testdir.runpytest(*args)
-
     deselect_prefix = "de" if deselect else ""
     lines = [fr"select: {deselect_prefix}selecting tests from '{selectfile}'$"]
     if fail_on_missing:
         lines.append(r"select: failing on missing selection items$")
     result.stdout.re_match_lines(lines)
-
 
 @pytest.mark.parametrize(
     ("option_name", "select_content", "exit_code", "outcomes"),
@@ -358,10 +335,8 @@ def test_comment_and_blanc_lines(testdir, option_name, select_content, exit_code
     )
     args.extend([option_name, select_file])
     result = testdir.runpytest(*args)
-
     assert result.ret == exit_code
     result.assert_outcomes(**outcomes)
-
 
 @pytest.mark.parametrize(
     ("option_name", "select_content", "exit_code", "outcomes"),
@@ -392,10 +367,8 @@ def test_nested_brackets(testdir, option_name, select_content, exit_code, outcom
     )
     args.extend([option_name, select_file])
     result = testdir.runpytest(*args)
-
     assert result.ret == exit_code
     result.assert_outcomes(**outcomes)
-
 
 @pytest.mark.parametrize(
     ("option_name", "select_content", "exit_code", "outcomes"),
@@ -424,7 +397,6 @@ def test_with_regexp_as_param(testdir, option_name, select_content, exit_code, o
     result = testdir.runpytest(*args)
     assert result.ret == exit_code
     result.assert_outcomes(**outcomes)
-
 
 @pytest.mark.parametrize("skipfile_str,is_regexp,test_name,params,", [
     ("file.py::test_name[r\"param-match\"]@regexp", True, "file.py::test_name", "param-match"),
@@ -461,11 +433,9 @@ def test_regexp_match(skipfile_str, is_regexp, test_name, params):
     assert (res_match is not None) is is_regexp
     if not is_regexp:
         return
-
     res_test_name, res_params = res_match.groups()
     assert res_test_name == test_name
     assert res_params == params
-
 
 @pytest.mark.parametrize("select", (None, ("test_a", ), ("test_a[1-1-1]", ),
                                     ("test_a[1-1-2]", "test_a[1-2-3]", "test_a[3-2-1]")))
@@ -480,7 +450,6 @@ def test_select_deselect_skip(testdir, select, deselect, skip, use_sharding):
     if use_sharding:
         args.append("--num-shards=1")
         args.append("--shard-id=0")
-
     def process_values(opt, values):
         if values is None:
             return set(node_ids) if opt is SELECT_OPT else set()
@@ -498,7 +467,6 @@ def test_select_deselect_skip(testdir, select, deselect, skip, use_sharding):
         if names:
             args.extend([f"{opt[:-9]}test", ";".join(names)])
         return set(node_ids) if "test_a" in values else set(values)
-
     select = process_values(SELECT_OPT, select)
     deselect = process_values(DESELECT_OPT, deselect)
     skip = process_values(SKIP_OPT, skip)
@@ -507,7 +475,81 @@ def test_select_deselect_skip(testdir, select, deselect, skip, use_sharding):
     select.difference_update(deselect)
     skip.difference_update(deselect)
     select.difference_update(skip)
-
     result = testdir.runpytest(*args)
     assert result.ret == ExitCode.OK if select else ExitCode.NO_TESTS_COLLECTED
     result.assert_outcomes(passed=len(select), deselected=len(deselect), skipped=len(skip))
+
+@pytest.mark.parametrize(
+    ("use_xdist", "skip_content", "expected_warning", "outcomes"),
+    [
+        (
+            False,  # No xdist
+            ["test_a[1-1]", "test_a[1-2]", "test_a[1-3]", "test_a[1-4]"],  # All variants
+            [
+                r"pytest-skip: All variants of parametrized test 'test_a' are skipped:",
+                r"\s+- test_a\[1-1\]",
+                r"\s+- test_a\[1-2\]",
+                r"\s+- test_a\[1-3\]",
+                r"\s+- test_a\[1-4\]"
+            ],
+            {"skipped": 4},
+        ),
+        (
+            False,  # No xdist
+            ["test_a[1-1]", "test_a[1-2]"],  # Partial variants
+            [],  # No warning expected
+            {"passed": 2, "skipped": 2},
+        ),
+        (
+            False,  # No xdist
+            ["test_a[r\"1-.*\"]@regexp"],  # Regex covering all variants
+            [
+                r"pytest-skip: All variants of parametrized test 'test_a' are skipped:",
+                r"\s+- test_a\[1-1\]",
+                r"\s+- test_a\[1-2\]",
+                r"\s+- test_a\[1-3\]",
+                r"\s+- test_a\[1-4\]"
+            ],
+            {"skipped": 4},
+        ),
+        (
+            True,  # With xdist
+            ["test_a[1-1]", "test_a[1-2]", "test_a[1-3]", "test_a[1-4]"],  # All variants
+            [
+                r"pytest-skip: All variants of parametrized test 'test_a' are skipped:",
+                r"\s+- test_a\[1-1\]",
+                r"\s+- test_a\[1-2\]",
+                r"\s+- test_a\[1-3\]",
+                r"\s+- test_a\[1-4\]"
+            ],
+            {"skipped": 4},
+        ),
+        (
+            False,  # No xdist
+            ["test_a[1-1]", "test_a[1-2]", "test_nonexistent"],  # Partial with nonexistent
+            [],  # No warning due to partial skip
+            {"passed": 2, "skipped": 2},
+        ),
+    ],
+)
+def test_all_variants_skipped_warning(is_xdist_installed, testdir, use_xdist, skip_content, expected_warning, outcomes):
+    """Test that a warning is issued when all variants of a parametrized test are skipped."""
+    if use_xdist and not is_xdist_installed:
+        pytest.skip("xdist is not installed")
+    testfile = testdir.makefile(".py", TEST_CONTENT)
+    skip_file = testdir.makefile(
+        ".txt",
+        *[line.format(testfile=testfile.relto(testdir.tmpdir)) for line in skip_content],
+    )
+    args = ["-v", "-Walways"]
+    if use_xdist:
+        args.append("-n 2")  # Run with 2 workers
+    args.extend([SKIP_OPT, skip_file])
+    result = testdir.runpytest(*args)
+    assert result.ret == ExitCode.OK
+    result.assert_outcomes(**outcomes)
+    if expected_warning:
+        result.stdout.re_match_lines(expected_warning)
+    else:
+        for line in result.stdout.str().splitlines():
+            assert not line.startswith("pytest-skip: All variants of parametrized test")
