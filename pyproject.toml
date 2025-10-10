@@ -1,6 +1,6 @@
 [project]
 name = "pytest-skip"
-version = "0.2.0"
+version = "0.2.1"
 description = "A pytest plugin which allows to (de-)select or skip tests from a file."
 authors = [
     { name = "Vlad Penkin", email="vlad.penkin@gmail.com" },
