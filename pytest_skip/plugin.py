@@ -187,8 +187,11 @@ class SelectConfig:
     deselect: Optional[Matcher]
     skip: Optional[Matcher]
     fail_on_missing: bool
+    no_warn_on_missing: bool
 
     def check_missing_tests(self):
+        if self.no_warn_on_missing and not self.fail_on_missing:
+            return
         for n, m in self.get_matchers().items():
             if (missing := set(m.test_names.keys()) - m.seen_test_names):
                 # If any items remain in `test_names` those tests either don't exist or
@@ -203,6 +206,7 @@ class SelectConfig:
     @classmethod
     def from_config(cls, config: pytest.Config) -> Optional["SelectConfig"]:
         fail_on_missing = config.getoption("selectfailonmissing")
+        no_warn_on_missing = config.getoption("selectnowarnonmissing")
         matchers: Dict[SelectOption, Optional[Matcher]] = {o: None for o in SelectOption}
         for option in SelectOption:
             for opt in option.value:
@@ -216,7 +220,8 @@ class SelectConfig:
                         add_fn(v)
         return SelectConfig(  # pylint: disable=E1120
             *tuple(matchers.values()),  # type: ignore[call-arg,arg-type]
-            fail_on_missing) if any(matchers.values()) else None
+            fail_on_missing,
+            no_warn_on_missing) if any(matchers.values()) else None
 
     def get_matchers(self) -> Dict[str, Optional[Matcher]]:
         return {k: v for k in ("select", "deselect", "skip") if (v := getattr(self, k)) is not None}
@@ -285,6 +290,13 @@ def pytest_addoption(parser: pytest.Parser):
         dest="selectfailonmissing",
         default=False,
         help="Fail instead of warn when not all (de-)selected tests could be found.",
+    )
+    select_group.addoption(
+        "--select-no-warn-on-missing",
+        action="store_true",
+        dest="selectnowarnonmissing",
+        default=False,
+        help="Do not warn when not all (de-)selected tests could be found.",
     )
     select_group.addoption(
         "--num-shards",
@@ -383,7 +395,7 @@ class SelectXdistPlugin(SelectPlugin):
         if select_config is None:
             return
         for n, m in select_config.get_matchers().items():
-            m.seen_test_names.update(worker_output[f"{n}_seen_test_names"])
+            m.seen_test_names.update(worker_output.get(f"{n}_seen_test_names", []))
 
     def pytest_sessionfinish(self, session, exitstatus):  # pylint: disable=W0613
         if (workeroutput := getattr(session.config, "workeroutput", None)) is None:
