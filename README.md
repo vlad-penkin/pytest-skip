@@ -6,7 +6,8 @@ This is a [pytest](https://pytest.org) plugin which allows to (de-)select or ski
 pytest-skip expands upon the capabilities of the original [pytest-select](https://github.com/ulope/pytest-select) plugin
 by adding
 - `--skip-from-file` option to skip tests instead of deselecting
-- support to (de-)select or skip parametrized tests without needing to specify test instance qualifiers
+- `--xfail-from-file` option to mark tests as expected to fail (xfail) instead of deselecting or skipping
+- support to (de-)select, skip or xfail parametrized tests without needing to specify test instance qualifiers
 - support for blank and comment lines in the selection files
 - better integration with the `pytest-xdist`, plugin warning and error messages are passed to the master node with proper stdout or stderr outputs
 - sharding functionality to distribute tests across several nodes
@@ -23,21 +24,42 @@ This plugin adds new command line options to pytest:
 - ``--select-from-file``
 - ``--deselect-from-file``
 - ``--skip-from-file``
+- ``--xfail-from-file``
 - ``--select-test``
 - ``--deselect-test``
 - ``--skip-from-test``
+- ``--xfail-test``
 - ``--select-fail-on-missing``
+- ``--xfail-strict``
 - ``--num-shards``, ``--shard-id`` and ``--sharding-mode``
 
-The first three expect an argument that resolves to one or multiple, semicolon-separated, UTF-8 encoded text file(s)
-containing one test name per line. Text file may contain blank and comment lines (starts from `#`). All three
-(select, deselect, skip) options can be used simultaneously.
+The first four expect an argument that resolves to one or multiple, semicolon-separated, UTF-8 encoded text file(s)
+containing one test name per line. Text file may contain blank and comment lines (starts from `#`). All four
+(select, deselect, skip, xfail) options can be used simultaneously.
 
-The next three expect one or multiple, semicolon-separated, test names to be selected, deselected or skipped.
+The next four expect one or multiple, semicolon-separated, test names to be selected, deselected, skipped or marked xfail.
 
-The next one changes the behaviour in case (de-)selected or skipped test names are missing from the to-be executed tests.
+The next one changes the behaviour in case (de-)selected, skipped or xfailed test names are missing from the to-be executed tests.
 By default a warning is emitted and the remaining selected tests are executed as normal.
 By using the ``--select-fail-on-missing`` flag this behaviour can be changed to instead abort execution in that case.
+
+``--skip-from-file``/``--skip-test`` and ``--xfail-from-file``/``--xfail-test`` differ in an important way: a skipped
+test's body never runs, while an xfailed test's body does run and is simply expected to fail. If an xfailed test
+unexpectedly passes, it is reported as ``XPASS`` rather than a plain pass, which is useful to surface tests that were
+expected to fail but no longer do.
+
+**Important**: by default, an ``XPASS`` does **not** fail the overall pytest run or change its exit code — this
+matches pytest's own default (non-strict) ``xfail`` behaviour. In other words, ``--xfail-from-file``/``--xfail-test``
+alone will surface a regression-fix in the ``XPASS`` line of the output, but it will **not** turn a CI run red on
+its own. If you want an unexpected pass to actually fail the run (and the exit code), either pass ``--xfail-strict``
+on the command line, or set ``xfail_strict = true`` in your own project's pytest configuration (which applies to
+all xfail markers, not just the ones added by this plugin).
+
+If a test name is listed in **both** ``--xfail-from-file``/``--xfail-test`` **and**
+``--skip-from-file``/``--skip-test`` or ``--deselect-from-file``/``--deselect-test``, the skip/deselect option takes
+precedence: the test is skipped or deselected as usual, and the xfail marker is **not** applied to it (marking a
+test that never runs as xfail would be meaningless). This is not a silent no-op: pytest-skip emits a warning naming
+the colliding test so the conflict isn't hidden.
 
 The sharding parameters allow users to split the test sets into even portions across multiple shards for parallel execution.
 The tests that are filtered out for a shard will be deselected.
@@ -67,11 +89,18 @@ Example::
     $~ cat skip2.txt
     test_parametrized[r"[579]"]@regexp
 
+    $~ cat xfail.txt
+    test_parametrized[3]
+    test_parametrized_complex[r"32-.*-.*"]@regexp
+
     $~ pytest --select-from-file select.txt
     $~ pytest --deselect-from-file deselect.txt
     $~ pytest --select-from-file select.txt --deselect-from-file deselect.txt --skip-from-file skip1.txt:skip2.txt
     $~ pytest --skip-from-file skip1.txt:skip2.txt --num-shards=4 --shard-id=0 --sharding-mode=round-robin
     $~ pytest --skip-from-file skip1.txt:skip2.txt --num-shards=4 --shard-id=0 --sharding-mode=contiguous-split
+    $~ pytest --xfail-from-file xfail.txt
+    $~ pytest --xfail-test "test_parametrized[3];test_parametrized[4]"
+    $~ pytest --xfail-from-file xfail.txt --xfail-strict
 
 
 Install from source
@@ -105,6 +134,18 @@ the maximum command length.
 
 Version History
 ---------------
+- ``v0.3.0`` (unreleased):
+    - Added `--xfail-from-file` and `--xfail-test` options to mark tests as expected to fail (xfail) instead of
+      deselecting or skipping them. Unlike skip, an xfailed test's body still runs; an unexpected pass is reported
+      as `XPASS`. By default this does NOT fail the run (matching pytest's own non-strict xfail default); use the
+      new `--xfail-strict` option (or your project's `xfail_strict = true` config) if you want an unexpected pass
+      to fail the run.
+    - Added `--xfail-strict` option to make xfail marks applied by this plugin strict.
+    - When a test name collides between `--xfail-from-file`/`--xfail-test` and
+      `--skip-from-file`/`--skip-test`/`--deselect-from-file`/`--deselect-test`, skip/deselect now deliberately take
+      precedence and the xfail marker is not applied; a warning is emitted naming the collision instead of silently
+      dropping the xfail request.
+
 - ``v0.2.0`` - 9/12/2025:
     - Added sharding functionality (`--num-shards`, `--shard-id`, `--sharding-mode`) to distribute tests across multiple nodes
     - Added ability to (de-)select or skip tests directly by name (`--select-test`, `--deselect-test`, `--skip-test`)
