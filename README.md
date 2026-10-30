@@ -6,7 +6,9 @@ This is a [pytest](https://pytest.org) plugin which allows to (de-)select or ski
 pytest-skip expands upon the capabilities of the original [pytest-select](https://github.com/ulope/pytest-select) plugin
 by adding
 - `--skip-from-file` option to skip tests instead of deselecting
-- support to (de-)select or skip parametrized tests without needing to specify test instance qualifiers
+- `--xfail-from-file` option to mark tests as expected to fail (xfail) instead of deselecting or skipping
+- `--xfail-norun-from-file` option to mark tests as `xfail(run=False)`: reported as xfail without running them
+- support to (de-)select, skip or xfail parametrized tests without needing to specify test instance qualifiers
 - support for blank and comment lines in the selection files
 - better integration with the `pytest-xdist`, plugin warning and error messages are passed to the master node with proper stdout or stderr outputs
 - sharding functionality to distribute tests across several nodes
@@ -23,21 +25,68 @@ This plugin adds new command line options to pytest:
 - ``--select-from-file``
 - ``--deselect-from-file``
 - ``--skip-from-file``
+- ``--xfail-from-file``
+- ``--xfail-norun-from-file``
 - ``--select-test``
 - ``--deselect-test``
-- ``--skip-from-test``
+- ``--skip-test``
+- ``--xfail-test``
+- ``--xfail-norun-test``
 - ``--select-fail-on-missing``
+- ``--xfail-strict``
 - ``--num-shards``, ``--shard-id`` and ``--sharding-mode``
 
-The first three expect an argument that resolves to one or multiple, semicolon-separated, UTF-8 encoded text file(s)
-containing one test name per line. Text file may contain blank and comment lines (starts from `#`). All three
-(select, deselect, skip) options can be used simultaneously.
+The first five expect an argument that resolves to one or multiple, semicolon-separated, UTF-8 encoded text file(s)
+containing one test name per line. Text file may contain blank and comment lines (starts from `#`). All five
+(select, deselect, skip, xfail, xfail-norun) options can be used simultaneously.
 
-The next three expect one or multiple, semicolon-separated, test names to be selected, deselected or skipped.
+The next five expect one or multiple, semicolon-separated, test names to be selected, deselected, skipped, marked
+xfail or marked xfail without running.
 
-The next one changes the behaviour in case (de-)selected or skipped test names are missing from the to-be executed tests.
+The next one changes the behaviour in case (de-)selected, skipped or xfailed test names are missing from the to-be executed tests.
 By default a warning is emitted and the remaining selected tests are executed as normal.
 By using the ``--select-fail-on-missing`` flag this behaviour can be changed to instead abort execution in that case.
+
+``--skip-from-file``/``--skip-test`` and ``--xfail-from-file``/``--xfail-test`` differ in an important way: a skipped
+test's body never runs, while an xfailed test's body does run and is simply expected to fail. If an xfailed test
+unexpectedly passes, it is reported as ``XPASS`` rather than a plain pass, which is useful to surface tests that were
+expected to fail but no longer do.
+
+**Important**: by default, an ``XPASS`` does **not** fail the overall pytest run or change its exit code. This
+matches pytest's own default (non-strict) ``xfail`` behaviour. In other words, ``--xfail-from-file``/``--xfail-test``
+alone will surface a regression-fix in the ``XPASS`` line of the output, but it will **not** turn a CI run red on
+its own. If you want an unexpected pass to actually fail the run (and the exit code), either pass ``--xfail-strict``
+on the command line, or set ``xfail_strict = true`` in your own project's pytest configuration (which applies to
+all xfail markers, not just the ones added by this plugin).
+
+If a test name is listed in **both** ``--xfail-from-file``/``--xfail-test`` **and**
+``--skip-from-file``/``--skip-test`` or ``--deselect-from-file``/``--deselect-test``, the skip/deselect option takes
+precedence: the test is skipped or deselected as usual, and the xfail marker is **not** applied to it (marking a
+test that never runs as xfail would be meaningless). This is not a silent no-op: pytest-skip emits a warning naming
+the colliding test so the conflict isn't hidden. A test that is only left out by
+``--select-from-file``/``--select-test`` is not a collision: the xfail request is dropped without a warning, as
+for ``--skip-from-file``/``--skip-test``.
+
+If the test function (or its ``pytest.param``) already carries its own ``@pytest.mark.xfail`` decorator, that
+decorator takes precedence over the xfail marker added by ``--xfail-from-file``/``--xfail-test``: its reason and
+``strict`` setting apply. An xfail mark on the class or module (``pytestmark``) does not: the plugin's marker, which
+is added to the test itself, wins over it. xfail-norun behaves
+differently, see below.
+
+``--xfail-norun-from-file``/``--xfail-norun-test`` take the same test names (including ``@regexp`` lines) and mark the
+matching tests with ``xfail(run=False)``: the test's setup and body never run, and it is reported as ``XFAIL`` with
+the reason ``[NOTRUN] Xfailed by pytest-skip``. Use it for tests that are known not to apply, so they cost no run
+time, are not hidden as skips, and are not counted as passes. Because the body never runs, the test can never
+``XPASS`` and ``--xfail-strict`` has no effect on it. pytest's own ``--runxfail`` flag still overrides this and runs
+the test.
+
+Precedence for xfail-norun:
+- skip/deselect (and select) win over xfail-norun exactly as they win over xfail, with the same kind of warning
+  for skip/deselect and no warning for a test left out by select.
+- If a test name is listed in **both** the xfail and the xfail-norun options, xfail-norun wins: the test is not run
+  and is reported as ``XFAIL``. A warning names the test.
+- If the test already carries its own ``@pytest.mark.xfail`` decorator, the xfail-norun marker still wins, so the
+  body is not run.
 
 The sharding parameters allow users to split the test sets into even portions across multiple shards for parallel execution.
 The tests that are filtered out for a shard will be deselected.
@@ -67,11 +116,20 @@ Example::
     $~ cat skip2.txt
     test_parametrized[r"[579]"]@regexp
 
+    $~ cat xfail.txt
+    test_parametrized[3]
+    test_parametrized_complex[r"32-.*-.*"]@regexp
+
     $~ pytest --select-from-file select.txt
     $~ pytest --deselect-from-file deselect.txt
-    $~ pytest --select-from-file select.txt --deselect-from-file deselect.txt --skip-from-file skip1.txt:skip2.txt
-    $~ pytest --skip-from-file skip1.txt:skip2.txt --num-shards=4 --shard-id=0 --sharding-mode=round-robin
-    $~ pytest --skip-from-file skip1.txt:skip2.txt --num-shards=4 --shard-id=0 --sharding-mode=contiguous-split
+    $~ pytest --select-from-file select.txt --deselect-from-file deselect.txt --skip-from-file "skip1.txt;skip2.txt"
+    $~ pytest --skip-from-file "skip1.txt;skip2.txt" --num-shards=4 --shard-id=0 --sharding-mode=round-robin
+    $~ pytest --skip-from-file "skip1.txt;skip2.txt" --num-shards=4 --shard-id=0 --sharding-mode=contiguous-split
+    $~ pytest --xfail-from-file xfail.txt
+    $~ pytest --xfail-test "test_parametrized[3];test_parametrized[4]"
+    $~ pytest --xfail-from-file xfail.txt --xfail-strict
+    $~ pytest --xfail-norun-from-file xfail.txt
+    $~ pytest --xfail-norun-test "test_parametrized[3];test_parametrized[4]"
 
 
 Install from source
@@ -105,6 +163,20 @@ the maximum command length.
 
 Version History
 ---------------
+- ``v0.3.0`` (unreleased):
+    - Added `--xfail-from-file` and `--xfail-test` options to mark tests as expected to fail (xfail) instead of
+      deselecting or skipping them. Unlike skip, an xfailed test's body still runs; an unexpected pass is reported
+      as `XPASS`. By default this does NOT fail the run (matching pytest's own non-strict xfail default); use the
+      new `--xfail-strict` option (or your project's `xfail_strict = true` config) if you want an unexpected pass
+      to fail the run.
+    - Added `--xfail-strict` option to make xfail marks applied by this plugin strict.
+    - When a test name collides between `--xfail-from-file`/`--xfail-test` and
+      `--skip-from-file`/`--skip-test`/`--deselect-from-file`/`--deselect-test`, skip/deselect now deliberately take
+      precedence and the xfail marker is not applied; a warning is emitted naming the collision instead of silently
+      dropping the xfail request.
+    - Added `--xfail-norun-from-file` and `--xfail-norun-test` options to mark tests as `xfail(run=False)`: the
+      test is reported as `XFAIL` without running it. On a name collision with the xfail options, xfail-norun wins.
+
 - ``v0.2.0`` - 9/12/2025:
     - Added sharding functionality (`--num-shards`, `--shard-id`, `--sharding-mode`) to distribute tests across multiple nodes
     - Added ability to (de-)select or skip tests directly by name (`--select-test`, `--deselect-test`, `--skip-test`)

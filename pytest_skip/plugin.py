@@ -14,6 +14,8 @@ class SelectOption(Enum):
     SELECT = ("selectfromfile", "selecttest")
     DESELECT = ("deselectfromfile", "deselecttest")
     SKIP = ("skipfromfile", "skiptest")
+    XFAIL = ("xfailfromfile", "xfailtest")
+    XFAIL_NORUN = ("xfailnorunfromfile", "xfailnoruntest")
 
 
 @dataclass
@@ -186,6 +188,8 @@ class SelectConfig:
     select: Optional[Matcher]
     deselect: Optional[Matcher]
     skip: Optional[Matcher]
+    xfail: Optional[Matcher]
+    xfail_norun: Optional[Matcher]
     fail_on_missing: bool
 
     def check_missing_tests(self):
@@ -193,8 +197,9 @@ class SelectConfig:
             if (missing := set(m.test_names.keys()) - m.seen_test_names):
                 # If any items remain in `test_names` those tests either don't exist or
                 # have been deselected by another way - warn user
-                message = (f"\npytest-skip: Not all tests to {n} exist.\n"
-                           f"Missing test names to {n}:\n  - ")
+                label = n.replace("_", "-")
+                message = (f"\npytest-skip: Not all tests to {label} exist.\n"
+                           f"Missing test names to {label}:\n  - ")
                 message += "\n  - ".join(missing)
                 if self.fail_on_missing:
                     raise UsageError(message)
@@ -219,7 +224,11 @@ class SelectConfig:
             fail_on_missing) if any(matchers.values()) else None
 
     def get_matchers(self) -> Dict[str, Optional[Matcher]]:
-        return {k: v for k in ("select", "deselect", "skip") if (v := getattr(self, k)) is not None}
+        return {
+            k: v
+            for k in ("select", "deselect", "skip", "xfail", "xfail_norun")
+            if (v := getattr(self, k)) is not None
+        }
 
 
 def pytest_addoption(parser: pytest.Parser):
@@ -259,6 +268,22 @@ def pytest_addoption(parser: pytest.Parser):
         help="Mark tests from one or multiple, semicolon-separated, file(s) as skipped.",
     )
     select_group.addoption(
+        "--xfail-from-file",
+        action="store",
+        dest="xfailfromfile",
+        default=None,
+        help="Mark tests from one or multiple, semicolon-separated, file(s) as xfail "
+        "(expected to fail).",
+    )
+    select_group.addoption(
+        "--xfail-norun-from-file",
+        action="store",
+        dest="xfailnorunfromfile",
+        default=None,
+        help="Mark tests from one or multiple, semicolon-separated, file(s) as xfail(run=False): "
+        "reported as XFAIL without running the test.",
+    )
+    select_group.addoption(
         "--select-test",
         action="store",
         dest="selecttest",
@@ -277,7 +302,22 @@ def pytest_addoption(parser: pytest.Parser):
         action="store",
         dest="skiptest",
         default=None,
-        help="Mark one or multiple, comma-separated, test names as skipped.",
+        help="Mark one or multiple, semicolon-separated, test names as skipped.",
+    )
+    select_group.addoption(
+        "--xfail-test",
+        action="store",
+        dest="xfailtest",
+        default=None,
+        help="Mark one or multiple, semicolon-separated, test names as xfail (expected to fail).",
+    )
+    select_group.addoption(
+        "--xfail-norun-test",
+        action="store",
+        dest="xfailnoruntest",
+        default=None,
+        help="Mark one or multiple, semicolon-separated, test names as xfail(run=False): "
+        "reported as XFAIL without running the test.",
     )
     select_group.addoption(
         "--select-fail-on-missing",
@@ -285,6 +325,16 @@ def pytest_addoption(parser: pytest.Parser):
         dest="selectfailonmissing",
         default=False,
         help="Fail instead of warn when not all (de-)selected tests could be found.",
+    )
+    select_group.addoption(
+        "--xfail-strict",
+        action="store_true",
+        dest="xfailstrict",
+        default=False,
+        help="Make xfail marks applied via --xfail-from-file/--xfail-test strict, so that an "
+        "unexpected pass (XPASS) fails the overall pytest run. By default (this flag unset), "
+        "pytest's xfail_strict ini setting applies, which is non-strict unless set: XPASS is "
+        "reported but does NOT fail the run or change the exit code.",
     )
     select_group.addoption(
         "--num-shards",
@@ -314,21 +364,30 @@ def pytest_addoption(parser: pytest.Parser):
 @pytest.hookimpl(trylast=True)  # pragma: no mutate
 def pytest_report_header(config) -> List[str]:  # pylint:disable = R1710
     hdr = []
+    actions = {
+        SelectOption.SELECT: "selecting",
+        SelectOption.DESELECT: "deselecting",
+        SelectOption.SKIP: "skipping",
+        SelectOption.XFAIL: "xfailing",
+        SelectOption.XFAIL_NORUN: "xfailing without running",
+    }
     for option in SelectOption:
         for opt in option.value:
             if (value := config.getoption(opt)) is None:
                 continue
-            action = "selecting" if option == SelectOption.SELECT else "deselecting" if option == SelectOption.DESELECT else "skipping"
+            action = actions[option]
             value = f"from '{value}'" if opt.endswith("file") else f"'{value}'"
             hdr.append(f"select: {action} tests {value}")
     if config.getoption("selectfailonmissing"):
         hdr.append("select: failing on missing selection items")
+    if config.getoption("xfailstrict"):
+        hdr.append("select: enforcing strict xfail (XPASS fails the run)")
     return hdr
 
 
 class SelectPlugin:
 
-    def pytest_collection_modifyitems(
+    def pytest_collection_modifyitems(  # pylint: disable=R0912, R0914
         self,
         session,  # pylint: disable=W0613
         config: pytest.Config,
@@ -346,17 +405,88 @@ class SelectPlugin:
             selected, deselected, skipped = items, [], []
         else:
             selected, deselected, skipped = [], [], []
-            select, deselect, skip = select_config.select, select_config.deselect, select_config.skip
+            select, deselect, skip, xfail, xfail_norun = (
+                select_config.select,
+                select_config.deselect,
+                select_config.skip,
+                select_config.xfail,
+                select_config.xfail_norun,
+            )
+            # Without --xfail-strict, leave `strict` unset so pytest falls back to the
+            # project's xfail_strict ini setting, as it does for a hand-written xfail mark.
+            xfail_kwargs = {"strict": True} if config.getoption("xfailstrict") else {}
             for item in items:
                 if select is None or select.match_item(item):
                     selected.append(item)
-                if deselect and deselect.match_item(item) and selected and selected[-1] is item:
+                is_selected = bool(selected) and selected[-1] is item
+
+                # NOTE: `Matcher.match_item()` has the side effect of recording the
+                # matched name in `seen_test_names` (used for missing-test detection),
+                # independently of whether the corresponding action ends up being
+                # applied below. This is intentional: it lets `check_missing_tests()`
+                # correctly report "matched a real test" even when a name collision
+                # (see xfail handling below) means the action itself isn't applied.
+                deselect_matched = deselect is not None and deselect.match_item(item)
+                deselect_applied = deselect_matched and is_selected
+                if deselect_applied:
                     selected.pop()
                     deselected.append(item)
-                if skip and skip.match_item(item) and selected and selected[-1] is item:
+                    is_selected = False
+
+                skip_matched = skip is not None and skip.match_item(item)
+                skip_applied = skip_matched and is_selected
+                if skip_applied:
                     selected.pop()
                     skipped.append(item)
                     item.add_marker(pytest.mark.skip(reason="Skipped by pytest-skip"))
+                    is_selected = False
+
+                # None for a test merely left out by --select-*: that is not a collision, so
+                # xfail requests on it are dropped without a warning, as for --skip-test.
+                not_selected_reason = ("deselected"
+                                       if deselect_applied else "skipped" if skip_applied else None)
+
+                xfail_norun_matched = xfail_norun is not None and xfail_norun.match_item(item)
+                xfail_norun_applied = xfail_norun_matched and is_selected
+                if xfail_norun_applied:
+                    # pytest honours only the first xfail mark on an item whose condition holds.
+                    # Prepend, so an xfail decorator already on the test cannot win and run its body.
+                    item.add_marker(pytest.mark.xfail(reason="Xfailed by pytest-skip", run=False),
+                                    append=False)
+                elif xfail_norun_matched and not_selected_reason:
+                    warnings.warn(
+                        UserWarning(
+                            f"pytest-skip: '{item.nodeid}' matched --xfail-norun-from-file/"
+                            f"--xfail-norun-test, but the test is {not_selected_reason}; the "
+                            "xfail(run=False) marker was NOT applied. deselect/skip take "
+                            "precedence over xfail-norun when a test name collides across "
+                            "options."))
+
+                xfail_matched = xfail is not None and xfail.match_item(item)
+                if xfail_matched:
+                    if xfail_norun_applied:
+                        warnings.warn(
+                            UserWarning(
+                                f"pytest-skip: '{item.nodeid}' matched both --xfail-from-file/"
+                                "--xfail-test and --xfail-norun-from-file/--xfail-norun-test; "
+                                "xfail-norun takes precedence and the test is marked "
+                                "xfail(run=False)."))
+                    elif is_selected:
+                        item.add_marker(
+                            pytest.mark.xfail(reason="Xfailed by pytest-skip", **xfail_kwargs))
+                    elif not_selected_reason:
+                        # The name also matched --deselect-from-file/--deselect-test or
+                        # --skip-from-file/--skip-test. This is a deliberate precedence
+                        # decision: deselect/skip win over xfail on a name collision, since
+                        # xfail only makes sense for a test whose body actually runs.
+                        # Surface the collision explicitly instead of silently dropping
+                        # the xfail request with zero signal to the user.
+                        warnings.warn(
+                            UserWarning(
+                                f"pytest-skip: '{item.nodeid}' matched --xfail-from-file/"
+                                f"--xfail-test, but the test is {not_selected_reason}; the xfail "
+                                "marker was NOT applied. deselect/skip take precedence "
+                                "over xfail when a test name collides across options."))
             self.select_config = select_config  # pylint: disable=W0201
 
         if sharding_config is not None:

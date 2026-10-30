@@ -3,7 +3,7 @@ import functools
 from typing import Optional
 import pytest
 
-from .conftest import SELECT_OPT, DESELECT_OPT, SKIP_OPT
+from .conftest import SELECT_OPT, DESELECT_OPT, SKIP_OPT, XFAIL_OPT
 
 
 @functools.lru_cache
@@ -66,8 +66,8 @@ def extract_test_names(outlines: list[str]) -> dict[str, list[str]]:
         "SKIPPED": ["file.py::test_2[param2]", "file.py::test_2[param3]"],
     }
     """
-    regexp = re.compile(r"^(.*) (FAILED|PASSED|SKIPPED).*\[\s*\d+%\]$")
-    test_names: dict[str, list[str]] = {"FAILED": [], "PASSED": [], "SKIPPED": []}
+    regexp = re.compile(r"^(.*) (FAILED|PASSED|SKIPPED|XPASS).*\[\s*\d+%\]$")
+    test_names: dict[str, list[str]] = {"FAILED": [], "PASSED": [], "SKIPPED": [], "XPASS": []}
     for line in outlines:
         line = line.strip()
         match = re.match(regexp, line)
@@ -118,13 +118,21 @@ def assert_sharding(  # pylint: disable=too-many-arguments, too-many-locals, too
     test_name: str,
     extra_pytest_args: Optional[list] = None,
     passed_tests_per_shard: Optional[list[str]] = None,
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """
     Run pytest with sharding and (optionally) extra CLI args per shard.
-    Returns a dictionary with passed tests as a key and their parameters as a value.
-    Output example: {"file.py::test": ["1", "2"], "file.py::test_2": ["1-1", "1-2"]}
+
+    Returns a 2-tuple:
+      - a dictionary with passed-or-xpassed tests as a key and their parameters as a value
+        (XPASS is folded into this bucket since, from a "did the shard select/run it"
+        perspective, both are part of the selected/executed tests).
+        Output example: {"file.py::test": ["1", "2"], "file.py::test_2": ["1-1", "1-2"]}
+      - a dictionary with only the xpassed tests, in the same shape, so callers can verify
+        which (if any) specific tests were actually marked xfail and unexpectedly passed,
+        rather than only the merged/aggregate count.
     """
     combined_outputs: dict[str, list[str]] = {}
+    combined_xpass: dict[str, list[str]] = {}
 
     if num_selected > num_shards:
         shard_sizes = {
@@ -149,7 +157,11 @@ def assert_sharding(  # pylint: disable=too-many-arguments, too-many-locals, too
                                          [])) == num_not_passed_per_shard.get("FAILED", 0)
         assert len(grouped["SKIPPED"].get(test_name,
                                           [])) == num_not_passed_per_shard.get("SKIPPED", 0)
-        out = grouped["PASSED"]
+        # Tests marked xfail by pytest-skip that still pass are reported as
+        # XPASS rather than PASSED, but they are still part of the shard's
+        # selected/executed tests, so fold them back in here.
+        out = merge_list_dicts(dict(grouped["PASSED"]), grouped["XPASS"])
+        combined_xpass = merge_list_dicts(combined_xpass, dict(grouped["XPASS"]))
 
         if len(out) == 0:
             assert is_empty_shard
@@ -168,7 +180,7 @@ def assert_sharding(  # pylint: disable=too-many-arguments, too-many-locals, too
 
         combined_outputs = merge_list_dicts(combined_outputs, out)
 
-    return combined_outputs
+    return combined_outputs, combined_xpass
 
 
 # ===== Tests =====
@@ -183,7 +195,7 @@ def test_even_sharding(testdir, num_tests, num_shards, sharding_mode):
     testdir.makefile(".py", test_content)
     test_name = f"test_even_sharding.py::{case_name}"
 
-    combined_outputs = assert_sharding(
+    combined_outputs, combined_xpass = assert_sharding(
         testdir,
         num_not_passed_per_shard={
             "FAILED": 0,
@@ -198,6 +210,9 @@ def test_even_sharding(testdir, num_tests, num_shards, sharding_mode):
         ],
     )
 
+    # No xfail option is used here, so no test should ever surface as XPASS.
+    assert not combined_xpass
+
     if len(combined_outputs) == 0:
         assert num_tests == 0
         return
@@ -211,7 +226,7 @@ def test_even_sharding(testdir, num_tests, num_shards, sharding_mode):
     assert test_set == set(map(str, range(num_tests)))
 
 
-@pytest.mark.parametrize("select_option", [SELECT_OPT, DESELECT_OPT, SKIP_OPT])
+@pytest.mark.parametrize("select_option", [SELECT_OPT, DESELECT_OPT, SKIP_OPT, XFAIL_OPT])
 @pytest.mark.parametrize("sharding_mode", ["contiguous-split", "round-robin"])
 def test_tests_are_selected_with_sharding(testdir, select_option, sharding_mode):  # pylint: disable=too-many-locals
     num_tests = 32
@@ -230,6 +245,14 @@ def test_tests_are_selected_with_sharding(testdir, select_option, sharding_mode)
     elif select_option in (DESELECT_OPT, SKIP_OPT):
         num_selected_tests = num_tests - len(select_cases)
         passed_cases = set(map(str, range(num_tests))) - set(select_cases)
+    elif select_option == XFAIL_OPT:
+        # xfail doesn't remove tests from the run (unlike deselect/skip), it
+        # only marks the matched ones as expected-to-fail. Since the
+        # generated test always passes, those marked tests are still
+        # selected and sharded as usual, they just surface as XPASS instead
+        # of PASSED.
+        num_selected_tests = num_tests
+        passed_cases = set(map(str, range(num_tests)))
     else:
         assert False, f"Unknown select option: {select_option}"
 
@@ -239,7 +262,7 @@ def test_tests_are_selected_with_sharding(testdir, select_option, sharding_mode)
         *[line.format(testfile=testfile.relto(testdir.tmpdir)) for line in select_content],
     )
 
-    combined_passed = assert_sharding(
+    combined_passed, combined_xpass = assert_sharding(
         testdir,
         num_not_passed_per_shard={
             "FAILED": 0,
@@ -251,6 +274,17 @@ def test_tests_are_selected_with_sharding(testdir, select_option, sharding_mode)
         test_name=test_name,
         extra_pytest_args=[select_option, select_file, "--sharding-mode", sharding_mode],
     )
+
+    # This is the crux of xfail-under-sharding coverage: it's not enough for the
+    # aggregate pass-count to be unchanged (that would hold identically whether xfail
+    # marking under sharding works, is broken, or was never wired in at all). Assert that
+    # the XPASS bucket actually contains exactly the xfail-matched test names when
+    # --xfail-from-file is used, and is empty for every other option.
+    if select_option == XFAIL_OPT:
+        assert combined_xpass[test_name]
+        assert set(combined_xpass[test_name]) == set(select_cases)
+    else:
+        assert not combined_xpass
 
     if len(combined_passed) == 0:
         assert num_tests == 0
@@ -290,7 +324,7 @@ def test_sharding_modes(testdir, mode, tests_per_shard):
     test_name = f"test_sharding_modes.py::{case_name}"
     testdir.makefile(".py", test_content)
 
-    combined_outputs = assert_sharding(
+    combined_outputs, combined_xpass = assert_sharding(
         testdir,
         num_not_passed_per_shard={
             "FAILED": 0,
@@ -305,6 +339,9 @@ def test_sharding_modes(testdir, mode, tests_per_shard):
         ],
         passed_tests_per_shard=tests_per_shard,
     )
+
+    # No xfail option is used here, so no test should ever surface as XPASS.
+    assert not combined_xpass
 
     if len(combined_outputs) == 0:
         assert num_tests == 0
