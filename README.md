@@ -163,7 +163,7 @@ the maximum command length.
 
 Version History
 ---------------
-- ``v0.3.0`` (unreleased):
+- ``v0.3.0`` - 11/1/2026:
     - Added `--xfail-from-file` and `--xfail-test` options to mark tests as expected to fail (xfail) instead of
       deselecting or skipping them. Unlike skip, an xfailed test's body still runs; an unexpected pass is reported
       as `XPASS`. By default this does NOT fail the run (matching pytest's own non-strict xfail default); use the
