@@ -9,6 +9,9 @@ import importlib.metadata
 import pytest
 from pytest import UsageError
 
+# Set on items marked xfail(run=False) by this plugin when --xfail-overrides-skip is given.
+XFAIL_NORUN_OVERRIDES_SKIP = pytest.StashKey[bool]()
+
 
 class SelectOption(Enum):
     SELECT = ("selectfromfile", "selecttest")
@@ -337,6 +340,15 @@ def pytest_addoption(parser: pytest.Parser):
         "reported but does NOT fail the run or change the exit code.",
     )
     select_group.addoption(
+        "--xfail-overrides-skip",
+        action="store_true",
+        dest="xfailoverridesskip",
+        default=False,
+        help="Report tests matched by --xfail-norun-from-file/--xfail-norun-test as XFAIL "
+        "without running them even when their own skip or skipif marks (including pytest.param, "
+        "class and module marks) are true. By default those marks win and the test is reported SKIPPED.",
+    )
+    select_group.addoption(
         "--num-shards",
         action="store",
         dest="num_shards",
@@ -382,12 +394,14 @@ def pytest_report_header(config) -> List[str]:  # pylint:disable = R1710
         hdr.append("select: failing on missing selection items")
     if config.getoption("xfailstrict"):
         hdr.append("select: enforcing strict xfail (XPASS fails the run)")
+    if config.getoption("xfailoverridesskip"):
+        hdr.append("select: xfail-norun overriding skip marks")
     return hdr
 
 
 class SelectPlugin:
 
-    def pytest_collection_modifyitems(  # pylint: disable=R0912, R0914
+    def pytest_collection_modifyitems(  # pylint: disable=R0912, R0914, R0915
         self,
         session,  # pylint: disable=W0613
         config: pytest.Config,
@@ -415,6 +429,7 @@ class SelectPlugin:
             # Without --xfail-strict, leave `strict` unset so pytest falls back to the
             # project's xfail_strict ini setting, as it does for a hand-written xfail mark.
             xfail_kwargs = {"strict": True} if config.getoption("xfailstrict") else {}
+            xfail_overrides_skip = config.getoption("xfailoverridesskip")
             for item in items:
                 if select is None or select.match_item(item):
                     selected.append(item)
@@ -453,6 +468,8 @@ class SelectPlugin:
                     # Prepend, so an xfail decorator already on the test cannot win and run its body.
                     item.add_marker(pytest.mark.xfail(reason="Xfailed by pytest-skip", run=False),
                                     append=False)
+                    if xfail_overrides_skip:
+                        item.stash[XFAIL_NORUN_OVERRIDES_SKIP] = True
                 elif xfail_norun_matched and not_selected_reason:
                     warnings.warn(
                         UserWarning(
@@ -495,6 +512,17 @@ class SelectPlugin:
         items[:] = skipped + selected
         if deselected:
             config.hook.pytest_deselected(items=deselected)
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_setup(self, item: pytest.Item):
+        # pytest's skipping plugin checks skip marks before xfail marks in its own tryfirst
+        # setup hook. This plugin registers later, so this hook runs first and reports the
+        # test XFAIL before any skip mark is checked. Marks are read here, not at collection, to
+        # include skip marks a conftest adds after this plugin's collection hook. A test with no
+        # skip mark is left to pytest, so its outcomes stay as without the flag.
+        if (item.stash.get(XFAIL_NORUN_OVERRIDES_SKIP, False) and not item.config.option.runxfail
+                and any(mark.name in ("skip", "skipif") for mark in item.iter_markers())):
+            pytest.xfail("[NOTRUN] Xfailed by pytest-skip")
 
     def pytest_sessionfinish(self, session, exitstatus):  # pylint: disable=W0613
         if (select_config := getattr(self, "select_config", None)) is not None:
