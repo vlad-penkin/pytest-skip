@@ -174,7 +174,7 @@ the maximum command length.
 
 Version History
 ---------------
-- ``v0.4.0`` (unreleased):
+- ``v0.4.0`` - 11/19/2026:
     - Added `--xfail-overrides-skip` option: a test marked by `--xfail-norun-from-file`/`--xfail-norun-test` is
       reported as `XFAIL` without running even when its own, `pytest.param`, class, module or conftest-added skip
       marks are true.
