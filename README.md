@@ -34,6 +34,7 @@ This plugin adds new command line options to pytest:
 - ``--xfail-norun-test``
 - ``--select-fail-on-missing``
 - ``--xfail-strict``
+- ``--xfail-overrides-skip``
 - ``--num-shards``, ``--shard-id`` and ``--sharding-mode``
 
 The first five expect an argument that resolves to one or multiple, semicolon-separated, UTF-8 encoded text file(s)
@@ -87,6 +88,15 @@ Precedence for xfail-norun:
   and is reported as ``XFAIL``. A warning names the test.
 - If the test already carries its own ``@pytest.mark.xfail`` decorator, the xfail-norun marker still wins, so the
   body is not run.
+- A test's own true ``skip``/``skipif`` marks (also on its ``pytest.param``, class or module) win by default: pytest
+  checks skip marks before xfail marks, so the test is reported ``SKIPPED``. With ``--xfail-overrides-skip``, a test
+  marked by xfail-norun is reported ``XFAIL`` without running instead. The flag does not change
+  ``--xfail-from-file``/``--xfail-test`` entries, whose body would have to run, nor ``--runxfail``, under which skip
+  marks apply again. Skip marks are not evaluated with the flag, so a ``skipif`` whose condition raises gives
+  ``XFAIL``, not ``ERROR``. Tests with no skip mark are not affected by the flag. Skips raised while the module
+  is collected (module-level ``pytest.skip``, ``pytest.importorskip``) are not affected: the test is never
+  collected. A skip raised by a ``tryfirst`` ``pytest_runtest_setup`` hook in a subdirectory
+  conftest can still win.
 
 The sharding parameters allow users to split the test sets into even portions across multiple shards for parallel execution.
 The tests that are filtered out for a shard will be deselected.
@@ -130,6 +140,7 @@ Example::
     $~ pytest --xfail-from-file xfail.txt --xfail-strict
     $~ pytest --xfail-norun-from-file xfail.txt
     $~ pytest --xfail-norun-test "test_parametrized[3];test_parametrized[4]"
+    $~ pytest --xfail-norun-from-file xfail.txt --xfail-overrides-skip
 
 
 Install from source
@@ -163,6 +174,11 @@ the maximum command length.
 
 Version History
 ---------------
+- ``v0.4.0`` (unreleased):
+    - Added `--xfail-overrides-skip` option: a test marked by `--xfail-norun-from-file`/`--xfail-norun-test` is
+      reported as `XFAIL` without running even when its own, `pytest.param`, class, module or conftest-added skip
+      marks are true.
+
 - ``v0.3.0`` - 11/1/2026:
     - Added `--xfail-from-file` and `--xfail-test` options to mark tests as expected to fail (xfail) instead of
       deselecting or skipping them. Unlike skip, an xfailed test's body still runs; an unexpected pass is reported
